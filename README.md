@@ -47,13 +47,15 @@
 1. Распакуйте test_infotek.zip.
 
 2. Создайте виртуальное окружение. Введите одну из этих команд:
-      python -m venv myenv
-   source myenv/bin/activate    # Для Linux/Mac
-   .myenvScriptsactivate     # Для Windows
+   ``` python -m venv myenv```,
+   
+  ``` source myenv/bin/activate  ``` Для Linux/Mac,
+  
+  ``` .myenvScriptsactivate  ``` Для Windows
    
 
-3. Установите необходимые библиотеки с помощью следующей команды:
-      pip install -r requirements.txt
+4. Установите необходимые библиотеки с помощью следующей команды:
+      ```pip install -r requirements.txt```
    
 
 # Инструкция по использованию
@@ -61,7 +63,7 @@
 ## 1. Обучение модели
 
 Запустите программу в режиме обучения:
-python main.py --mode train --duration 60
+```python main.py --mode train --duration 60```
 
 
 • --mode: режим работы программы (train для обучения).
@@ -73,7 +75,7 @@ python main.py --mode train --duration 60
 ## 2. Детекция аномалий
 
 Запустите программу в режиме детекции:
-python main.py --mode detect --visualize
+```python main.py --mode detect --visualize```
 
 
 • --mode: режим работы программы (detect для детекции).
