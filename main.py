@@ -2,7 +2,6 @@ import os
 import logging
 import csv
 import argparse
-import scapy
 import joblib
 import numpy as np
 import pandas as pd
@@ -119,84 +118,83 @@ def train_model(training_data, model_path):
     """
     logging.info("Training model...")
 
-    # Загрузка данных
     data = pd.read_csv(training_data)
+    encoders = {
+        'protocol': LabelEncoder(),
+        'src_ip': LabelEncoder(),
+        'dst_ip': LabelEncoder()
+    }
 
-    label_encoder = LabelEncoder()
-
-    data["protocol"] = label_encoder.fit_transform(data["protocol"])
-    data["src_ip"] = label_encoder.fit_transform(data["src_ip"])
-    data["dst_ip"] = label_encoder.fit_transform(data["dst_ip"])
-
-
+    for col, le in encoders.items():
+        data[col] = le.fit_transform(data[col])
+        joblib.dump(le, os.path.join(MODEL_DIR, f"le_{col}.pkl"))
 
     scaler = StandardScaler()
     data_scaled = scaler.fit_transform(data)
+    joblib.dump(scaler, os.path.join(MODEL_DIR, "scaler.pkl"))
 
-    # Количество кластеров
+    #TODO Рассмотреть возможную реализацию метода локтя или подбор этого гиперпараметра через дендрограмму, GridSearch и оценка коэффициента силуэта, в целом много можно придумать
+    # Есть также опция подумать над другим алгоритмом кластеризации: DBSCAN или OPTICS, им не нужно передавать количество кластеров,
+    # однако они очень чувствительны к подбору гиперпараметров, также они возвращают out_of_bound итемы, что фактически решает задачу с аномалиями
+    #
+    # Также есть другая опция: рассмотреть использование одноклассового классификатора:
+    # One Class SVM https://scikit-learn.org/stable/modules/generated/sklearn.svm.OneClassSVM.html
+    # Пример использования https://scikit-learn.org/stable/auto_examples/applications/plot_outlier_detection_wine.html#sphx-glr-auto-examples-applications-plot-outlier-detection-wine-py
+    #
+    # IsolationForest(мне его реализация в sklearn не нравится, лучше не использовать) 
+    # https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.IsolationForest.html#sklearn.ensemble.IsolationForest
+    # Пример использования https://scikit-learn.org/stable/auto_examples/ensemble/plot_isolation_forest.html#sphx-glr-auto-examples-ensemble-plot-isolation-forest-py
     k = 3
-
-    # Обучение модели
+    
     kmeans = KMeans(n_clusters=k, random_state=42)
     kmeans.fit(data_scaled)
-    # Сохранение обученной модели K-Means
     joblib.dump(kmeans, model_path)
-
-    # Сохранение StandardScaler
-    scaler_path = os.path.join(MODEL_DIR, "scaler.pkl")
-    joblib.dump(scaler, scaler_path)
-
+    
     logging.info(f"Model saved to {model_path}")
 
 
-def detect_anomalies(data_path, model_path, scaler_path):
+def detect_anomalies(data_path, model_path):
     """
-    Применение обученной модели K-Means для обнаружения аномалий.
-
+    Детекция аномалий 
+    
     Args:
-    :param data_path: Путь к CSV-файлу с новыми данными.
-    :param model_path: Путь к сохраненной модели K-Means.
-    :param scaler_path: Путь к сохраненному объекту StandardScaler.
-    :return: DataFrame с аномалиями.
+    :param data_path: Путь к CSV-файлу с данными
+    :param model_path: Путь к обученной модели K-Means
+    
+    :return: DataFrame с аномалиями
     """
     data = pd.read_csv(data_path)
+    artifacts = {
+        'protocol': joblib.load(os.path.join(MODEL_DIR, "le_protocol.pkl")),
+        'src_ip': joblib.load(os.path.join(MODEL_DIR, "le_src_ip.pkl")),
+        'dst_ip': joblib.load(os.path.join(MODEL_DIR, "le_dst_ip.pkl")),
+        'scaler': joblib.load(os.path.join(MODEL_DIR, "scaler.pkl")),
+        'model': joblib.load(model_path)
+    }
 
-    label_encoder = LabelEncoder()  
-    data["protocol"] = label_encoder.fit_transform(data["protocol"])
-    data["src_ip"] = label_encoder.fit_transform(data["src_ip"])
-    data["dst_ip"] = label_encoder.fit_transform(data["dst_ip"])
-    mapping = dict(zip(label_encoder.classes_, range(len(label_encoder.classes_))))
-    joblib.dump(mapping, "mapping.pkl")
-   
-    scaler = joblib.load(scaler_path)
-    new_data_scaled = scaler.transform(data)
-    kmeans = joblib.load(model_path)
+    for col in ['protocol', 'src_ip', 'dst_ip']:
+        le = artifacts[col]
+        data[col] = data[col].apply(
+            lambda x: le.transform([x])[0] if x in le.classes_ else -1
+        )
+        
+    data_scaled = artifacts['scaler'].transform(data)
 
-    # Вычисление расстояний до ближайшего кластера
-    distances = kmeans.transform(new_data_scaled).min(axis=1)
+    distances = artifacts['model'].transform(data_scaled).min(axis=1)
     threshold = np.percentile(distances, 95)
-
-    # Обнаружение аномалий
     anomalies = distances > threshold
 
-    loaded_mapping = joblib.load("mapping.pkl")
-    reversed_mapping = {v: k for k, v in loaded_mapping.items()}
-    data['protocol'] = data['protocol'].map(reversed_mapping)
-    data['src_ip'] = data['src_ip'].map(reversed_mapping)
-    data['dst_ip'] = data['dst_ip'].map(reversed_mapping)
-
-    # Формирование DataFrame с аномалиями
     anomalous_data = data[anomalies]
     if anomalous_data.empty:
         logging.info("No anomalies detected.")
     else:
         logging.info(f"{len(anomalous_data)} anomalies detected.")
 
-    # Вывод отчета в консоль
     logging.info("Anomalies detected:")
     logging.info(anomalous_data.to_string(index=False))
 
-    # Сохранение отчета в файл
+    anomalous_data = anomalous_data.replace(-1, 'UNKNOWN_CATEGORY')
+    
     report_file = os.path.join(DATA_DIR, "anomalies_report.txt")
     with open(report_file, "w") as f:
         f.write("Anomalies Detected Report\n")
@@ -208,7 +206,7 @@ def detect_anomalies(data_path, model_path, scaler_path):
     return anomalous_data
 
 
-def visualize_clusters(data_path, model_path, scaler_path, output_path="cluster_plot.png"):
+def visualize_clusters(data_path, model_path, output_path="cluster_plot.png"):
     """
     Визуализация кластеров на тестовой выборке.
     
@@ -220,31 +218,35 @@ def visualize_clusters(data_path, model_path, scaler_path, output_path="cluster_
     """
     # Загрузка данных
     data = pd.read_csv(data_path)
-    data.fillna(0, inplace=True)  # Заполнение пропусков
 
-    # Загрузка моделей
-    scaler = joblib.load(scaler_path)
-    kmeans = joblib.load(model_path)
-    
     # Приведение данных к строковому типу
     data["src_ip"] = data["src_ip"].astype(str)
     data["dst_ip"] = data["dst_ip"].astype(str)
     data["protocol"] = data["protocol"].astype(str)
 
-    label_encoder = LabelEncoder()  
-    data["protocol"] = label_encoder.fit_transform(data["protocol"])
-    data["src_ip"] = label_encoder.fit_transform(data["src_ip"])
-    data["dst_ip"] = label_encoder.fit_transform(data["dst_ip"])
+    artifacts = {
+        'protocol': joblib.load(os.path.join(MODEL_DIR, "le_protocol.pkl")),
+        'src_ip': joblib.load(os.path.join(MODEL_DIR, "le_src_ip.pkl")),
+        'dst_ip': joblib.load(os.path.join(MODEL_DIR, "le_dst_ip.pkl")),
+        'scaler': joblib.load(os.path.join(MODEL_DIR, "scaler.pkl")),
+        'model': joblib.load(model_path)
+    }
+
+    for col in ['protocol', 'src_ip', 'dst_ip']:
+        le = artifacts[col]
+        data[col] = data[col].apply(
+            lambda x: le.transform([x])[0] if x in le.classes_ else -1
+        )
 
     # Масштабирование данных
-    data_scaled = scaler.transform(data)
+    data_scaled = artifacts['scaler'].transform(data)
 
     # Понижение размерности до 2D с помощью PCA
     pca = PCA(n_components=2)
     reduced_data = pca.fit_transform(data_scaled)
 
     # Предсказание кластеров
-    clusters = kmeans.predict(data_scaled)
+    clusters = artifacts['model'].predict(data_scaled)
 
     # Создание DataFrame для визуализации
     plot_data = pd.DataFrame(reduced_data, columns=["PC1", "PC2"])
@@ -266,6 +268,7 @@ def visualize_clusters(data_path, model_path, scaler_path, output_path="cluster_
     logging.info(f"Cluster plot saved to {output_path}")
     plt.show()
 
+
 def visualize_anomalies_2d(data_path, anomalies_path):
     """
     Визуализировать аномалии на 2D-графике.
@@ -278,9 +281,6 @@ def visualize_anomalies_2d(data_path, anomalies_path):
     data = pd.read_csv(data_path)
     anomalies = pd.read_csv(anomalies_path)
     
-    # Убедитесь, что аномалии имеют корректный индекс
-    # anomalies.set_index(data.index, inplace=True)
-
     # Разделение данных на нормальные и аномальные
     normal_data = data[~data.index.isin(anomalies.index.tolist())]
 
@@ -296,51 +296,64 @@ def visualize_anomalies_2d(data_path, anomalies_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Поиск аномалий в сетевой активности на хосте")
-    parser.add_argument(
-        "--mode",
-        type=str,
-        required=True,
-        choices=["train", "detect"],
-        help="Режим: обучение (train) или обнаружение аномалий (detect)",
-    )
-    parser.add_argument("--duration", type=int, default=60*60*24, help="Длительность сбора ОВ в секундах")
-    parser.add_argument(
-        "--input", type=str, help="Путь к файлу для обработки или анализа"
-    )
-    parser.add_argument("--visualize", type=str, choices=["data", "anomalies"], help="Визуализировать данные")
-    args = parser.parse_args()
+    def get_processed_data(input_file: str) -> str:
+        """Хелпер функция, которая позволяет либо производить захват трафика, если не передан input_file
+            либо обработать уже сохраненный pcap файл
 
+        Args:
+            input_file (str): входной файл
+        """
+        if input_file:
+            pcap_file = input_file
+        else:
+            filename = f"{args.mode}_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pcap"
+            pcap_file = os.path.join(DATA_DIR, filename)
+            capture_traffic(pcap_file, args.duration)
+        
+        processed_file = pcap_file.replace(".pcap", "_features.csv")
+        preprocess_data(pcap_file, processed_file)
+        
+        return processed_file
+    
+    parser = argparse.ArgumentParser(description="Поиск аномалий в сетевой активности на хосте")
+    
+    parser.add_argument("--mode", type=str, required=True, choices=["train", "detect"],
+                      help="Режим: обучение (train) или обнаружение аномалий (detect)")
+    parser.add_argument("--duration", type=int, default=60*60*24, 
+                      help="Длительность сбора ОВ в секундах")
+    parser.add_argument("--input_file", type=str, 
+                      help="Путь к файлу для обработки или анализа")
+    parser.add_argument("--visualize", type=str, choices=["data", "anomalies"], 
+                      help="Визуализировать данные")
+
+    args = parser.parse_args()
+    
+    if args.visualize and args.mode != "detect":
+        parser.error("Визуализация доступна только в режиме detect")
+    
     if args.mode == "train":
-        output_file = os.path.join(
-            DATA_DIR, f"training_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pcap"
-        )
-        capture_traffic(output_file, args.duration)
-        processed_file = output_file.replace(".pcap", "_features.csv")
-        preprocess_data(output_file, processed_file)
+        processed_file = get_processed_data(args.input_file)
         model_path = os.path.join(MODEL_DIR, "anomaly_model.pkl")
         train_model(processed_file, model_path)
-
+        
     elif args.mode == "detect":
-        test_file = os.path.join(
-            DATA_DIR, f"testing_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pcap"
-        )
-        capture_traffic(test_file, args.duration)
-        processed_file = test_file.replace(".pcap", "_features.csv")
-        preprocess_data(test_file, processed_file)
+        processed_file = get_processed_data(args.input_file)
+        
         model_path = os.path.join(MODEL_DIR, "anomaly_model.pkl")
-        scaler_path = os.path.join(MODEL_DIR, "scaler.pkl")
-        anomalies = detect_anomalies(
-            processed_file, model_path, scaler_path
-        )
+        
+        anomalies = detect_anomalies(processed_file, model_path)
         anomalies_output = os.path.join(DATA_DIR, "anomalies_detected.csv")
         anomalies.to_csv(anomalies_output, index=False)
         logging.info(f"Аномалии сохранены в {anomalies_output}")
 
-        if args.visualize=='data':
-            visualize_clusters(processed_file, model_path, scaler_path)
-        if args.visualize=='anomalies':
-            visualize_anomalies_2d(processed_file, anomalies_output)
+        visualizations = {
+            'data': lambda: visualize_clusters(processed_file, model_path),
+            'anomalies': lambda: visualize_anomalies_2d(processed_file, anomalies_output)
+        }
+        
+        if args.visualize in visualizations:
+            visualizations[args.visualize]()
+        
 
 if __name__ == "__main__":
     main()
